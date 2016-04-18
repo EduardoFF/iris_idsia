@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+
+## Simple demo that checks the proximity sensors
+## and uses leds to warn about the
+## detection of an object
+
+import rospy
+
+from sensor_msgs.msg import NavSatFix
+from geometry_msgs.msg import PoseStamped
+import socket
+import sys
+
+swarmix_agent_sock_addr = "/tmp/swarmix_agent_pos.sock"
+
+def transform_coordinate(src_epsg, dst_epsg, x, y):
+    import ogr, osr
+
+    pointX = -11705274.6374 
+    pointY = 4826473.6922
+    
+    # Spatial Reference System
+    inputEPSG = src_epsg
+    outputEPSG = dst_epsg
+
+    # create a geometry from coordinates
+    point = ogr.Geometry(ogr.wkbPoint)
+    point.AddPoint(x, y)
+
+    # create coordinate transformation
+    inSpatialRef = osr.SpatialReference()
+    inSpatialRef.ImportFromEPSG(inputEPSG)
+
+    outSpatialRef = osr.SpatialReference()
+    outSpatialRef.ImportFromEPSG(outputEPSG)
+
+    coordTransform = osr.CoordinateTransformation(inSpatialRef, outSpatialRef)
+
+    # transform point
+    point.Transform(coordTransform)
+
+    # print point in EPSG 4326
+    return point.GetX(), point.GetY()
+
+
+class GPSForward():
+
+    def __init__(self):
+        """ here's a list of things we could do here:
+        1- read parameters, e.g., 
+        using rospy.get_param(), 
+        2- call init_node
+        3- subscribe to specific topics
+        4 - create publishers
+        ...
+        """
+        rospy.init_node("gps_forward")
+        nodename = rospy.get_name()
+        rospy.loginfo("%s started" % nodename)
+
+        self.pose_pub = rospy.Publisher('pose', PoseStamped, queue_size=10)
+        rospy.Subscriber("/mavros/global_position/global", NavSatFix, self.globalpos_callback)        
+
+        """ if we need to do things repeatedly, 
+        set a reasonable rate
+        """
+        self.rate = rospy.get_param("~rate", 10)
+        rospy.loginfo("using rate %d hz",self.rate)
+        self.dst_epsg = rospy.get_param("~dst_epsg", 21781)
+        rospy.loginfo("converting to EPSG: %s",self.dst_epsg)
+
+        self.swarmix_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        rospy.loginfo("connecting to %s",swarmix_agent_sock_addr)
+        try:
+            self.swarmix_sock.connect(swarmix_agent_sock_addr)
+        except socket.error, msg:
+            print >>sys.stderr, msg
+            rospy.loginfo("can not connect to socket, you must restart the node "\
+                          "in order to try to connect again")
+            self.swarmix_sock = None
+        
+    def spin(self):
+        """ here's the main (control) loop 
+        """
+        r = rospy.Rate(self.rate)
+
+        
+        while not rospy.is_shutdown():
+            self.spin_once()
+            r.sleep()
+
+    def spin_once(self):
+        """ this is executed at each contorl loop iteration
+        """
+    def globalpos_callback(self, data):
+        rospy.loginfo(rospy.get_caller_id() + "I heard %f %f", data.longitude, data.latitude)
+        pose = PoseStamped()
+        
+        x,y = transform_coordinate(4326, self.dst_epsg, data.longitude, data.latitude)
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.position.z = data.altitude
+        self.pose_pub.publish(pose)
+        #os.system("echo %.8f %.8f | socat - UNIX-SENDTO:/tmp/swarmix_agent_pos.sock"%(x,y))
+        if self.swarmix_sock:
+            
+            data_str = "%.8f %.8f\n"%(x,y)
+            self.swarmix_sock.sendall(data_str)
+        
+    
+
+if __name__ == '__main__':
+    try:
+        GPSForward().spin()
+    except rospy.ROSInterruptException:
+        pass
